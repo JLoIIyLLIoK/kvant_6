@@ -408,9 +408,18 @@ class Heap:
         vm передаётся, чтобы сборщик мог спросить у машины корни (vm.roots())
         и номер текущей команды (vm.steps) для графика.
         """
-        # TODO 4.3  Проверить n (число, 1…4096), создать HeapObject, обновить
-        #           used / peak / allocated, добавить в self.objects,
-        #           записать в self.log (vm.steps, self.used, 'alloc').
+        if not isinstance(n, int) or not 1 <= n <= 4096:
+            raise VMError('неверный размер массива')
+
+        obj = HeapObject(n, fill)
+
+        self.objects.append(obj)
+        self.used += n + 1
+        self.peak = max(self.peak, self.used)
+        self.allocated += 1
+        self.log.append((vm.steps, self.used, 'alloc'))
+
+        return obj
         # TODO 6.3  Перед созданием: если не no_limit и used + (n+1) > capacity —
         #           self.collect(vm); если места всё равно нет — VMError('OUT OF MEMORY').
         raise NotImplementedError('Глава 4: Heap.alloc')
@@ -562,8 +571,15 @@ class VM:
     def pop_ref(self) -> HeapObject:
         """Снять ССЫЛКУ на живой объект. Число — 'ожидалась ссылка';
         освобождённый объект — 'обращение к освобождённому объекту'."""
-        # TODO 4.3
-        raise NotImplementedError('Глава 4: VM.pop_ref')
+        value = self.pop()
+
+        if not isinstance(value, HeapObject):
+            raise VMError('ожидалась ссылка')
+
+        if not value.alive:
+            raise VMError('обращение к освобождённому объекту')
+
+        return value
 
     # ── ГЛАВА 3: главный цикл ───────────────────────────────────────────
     def step(self):
@@ -679,9 +695,15 @@ class VM:
         self.push(wrap32(-a))
 
     def op_eq(self, args):
-        b = self.pop_int()
-        a = self.pop_int()
-        self.push(1 if a == b else 0)
+        b = self.pop()
+        a = self.pop()
+
+        if isinstance(a, HeapObject) or isinstance(b, HeapObject):
+            result = isinstance(a, HeapObject) and isinstance(b, HeapObject) and a is b
+        else:
+            result = a == b
+
+        self.push(1 if result else 0)
 
     def op_lt(self, args):
         b = self.pop_int()
@@ -725,13 +747,17 @@ class VM:
         self.pc = args[0]
 
     def op_jz(self, args):
-        value = self.pop_int()
-        if value == 0:
+        value = self.pop()
+        is_zero = not isinstance(value, HeapObject) and value == 0
+
+        if is_zero:
             self.pc = args[0]
 
     def op_jnz(self, args):
-        value = self.pop_int()
-        if value != 0:
+        value = self.pop()
+        is_nonzero = isinstance(value, HeapObject) or value != 0
+
+        if is_nonzero:
             self.pc = args[0]
 
     def op_print(self, args):
@@ -746,16 +772,92 @@ class VM:
         value = self.pop_int()
         if value == 0:
             raise VMError(f'ASSERT {args[0]}: тест не пройден')
-        
-    # TODO 3.5  Напишите остальные обработчики. Имена: 
-    #   op_call, op_ret, op_new, op_getf, op_setf, op_len, op_meminfo, op_pix (глава 4)
-    #
-    # Пример для разгона:
-    #
-    #   def op_add(self, args):
-    #       b = self.pop_int()          # вершина — второй операнд!
-    #       a = self.pop_int()
-    #       self.push(wrap32(a + b))
+
+    def op_call(self, args):
+        address = args[0]
+        n = args[1]
+
+        # Проверяем, не превышено ли допустимое число кадров.
+        if len(self.frames) >= FRAME_LIMIT:
+            raise VMError('превышена максимальная глубина рекурсии кадров')
+
+        values = [self.pop() for _ in range(n)]
+        values.reverse()
+
+        frame = Frame(ret=self.pc, base=len(self.stack))
+
+        for i, value in enumerate(values):
+            frame.locals[i] = value
+
+        self.frames.append(frame)
+        self.pc = address
+
+    def op_ret(self, args):
+        if len(self.frames) == 1:
+            raise VMError('RET из главной программы')
+
+        frame = self.frame
+        value = self.pop()
+
+        del self.stack[frame.base:]
+        self.frames.pop()
+
+        self.pc = frame.ret
+        self.push(value)
+
+    def op_new(self, args):
+        n = self.pop_int()
+        obj = self.heap.alloc(n, self)
+        self.push(obj)
+
+    def op_len(self, args):
+        obj = self.pop_ref()
+        self.push(len(obj.items))
+
+    def op_getf(self, args):
+        index = self.pop_int()
+        obj = self.pop_ref()
+
+        if index < 0 or index >= len(obj.items):
+            raise VMError('индекс вне границ массива')
+
+        self.push(obj.items[index])
+
+    def op_setf(self, args):
+        value = self.pop()
+        index = self.pop_int()
+        obj = self.pop_ref()
+
+        if index < 0 or index >= len(obj.items):
+            raise VMError('индекс вне границ массива')
+
+        obj.items[index] = value
+
+    def op_pix(self, args):
+        c = self.pop_int()
+        y = self.pop_int()
+        x = self.pop_int()
+
+        if not (0 <= x < 32 and 0 <= y < 32):
+            raise VMError('координаты PIX вне границ экрана')
+
+        self.screen[y][x] = c
+
+    def op_meminfo(self, args):
+        k = args[0]
+
+        if k == 0:
+            value = self.heap.gc_count
+        elif k == 1:
+            value = self.heap.used
+        elif k == 2:
+            value = self.heap.peak
+        elif k == 3:
+            value = self.heap.capacity
+        else:
+            raise VMError('неверный параметр MEMINFO')
+
+        self.push(value)
 
     # ── ГЛАВА 6: корни ──────────────────────────────────────────────────
     def roots(self):

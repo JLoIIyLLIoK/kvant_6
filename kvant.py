@@ -80,35 +80,93 @@ class Reader:
         self.pos = 0            # где сейчас курсор
 
     def take(self, n: int) -> bytes:
-        """Вернуть следующие n байтов и сдвинуть курсор. Если байтов не хватает — LoadError."""
-        # TODO 1.1  Подсказка: срез  self.data[self.pos : self.pos + n]
-        raise NotImplementedError('Глава 1: Reader.take')
+        """Вернуть следующие n байтов и сдвинуть курсор.
+
+        Если запрошено отрицательное число байтов или данных недостаточно,
+        возбуждается LoadError. При ошибке позиция курсора не меняется.
+        """
+        if n < 0 or self.pos + n > len(self.data):
+            raise LoadError(
+                f'Недостаточно байтов: запрошено {n}, доступно {len(self.data) - self.pos}'
+            )
+
+        result = self.data[self.pos:self.pos + n]
+        self.pos += n
+        return result
 
     def u8(self) -> int:
         """1 байт без знака (0…255)."""
-        # TODO 1.1
-        raise NotImplementedError('Глава 1: Reader.u8')
+        return self.take(1)[0]
 
     def u16(self) -> int:
         """2 байта без знака, big-endian."""
-        # TODO 1.1  Подсказка: int.from_bytes(..., 'big')
-        raise NotImplementedError('Глава 1: Reader.u16')
+        return int.from_bytes(self.take(2), 'big')
 
     def u32(self) -> int:
         """4 байта без знака, big-endian."""
-        # TODO 1.1
-        raise NotImplementedError('Глава 1: Reader.u32')
+        return int.from_bytes(self.take(4), 'big')
 
 
 def load(data: bytes) -> Cartridge:
-    """Разобрать картридж (формат — в главе 1 задачника).
+    """Разобрать картридж формата KVNT и проверить его SHA-256."""
+    # Хеш занимает последние 32 байта. Файл должен содержать хотя бы
+    # сигнатуру и отдельный блок контрольной суммы.
+    if len(data) < 4 + 32:
+        raise LoadError('Файл слишком короткий: отсутствует заголовок или SHA-256')
 
-    Проверить: длину, сигнатуру KVNT, SHA-256 (последние 32 байта файла).
-    При любой проблеме — raise LoadError('понятное сообщение').
-    """
-    # TODO 1.2  Порядок полей: сигнатура, версия, владелец, тип, куча,
-    #           глобальные, точка входа, пул строк, код, контрольная сумма.
-    raise NotImplementedError('Глава 1: load')
+    body = data[:-32]
+    digest = data[-32:]
+
+    if body[:4] != MAGIC:
+        raise LoadError('Неверная сигнатура: ожидалось KVNT')
+
+    expected_digest = hashlib.sha256(body).digest()
+    if digest != expected_digest:
+        raise LoadError('Контрольная сумма SHA-256 не совпадает: картридж повреждён')
+
+    try:
+        r = Reader(body)
+        r.take(4)  # сигнатура KVNT уже проверена
+
+        version = (r.u8(), r.u8())
+
+        owner_length = r.u8()
+        owner = r.take(owner_length).decode('utf-8')
+
+        kind = r.u8()
+        heap = r.u16()
+        nglobals = r.u8()
+        entry = r.u16()
+
+        const_count = r.u16()
+        consts = []
+        for _ in range(const_count):
+            string_length = r.u16()
+            consts.append(r.take(string_length).decode('utf-8'))
+
+        code_length = r.u32()
+        code = r.take(code_length)
+
+        # После чтения секции кода курсор должен находиться ровно
+        # перед 32-байтовой контрольной суммой (то есть в конце body).
+        if r.pos != len(body):
+            raise LoadError('Некорректная длина картриджа: после кода остались лишние байты')
+
+        return Cartridge(
+            owner=owner,
+            kind=kind,
+            heap=heap,
+            nglobals=nglobals,
+            entry=entry,
+            consts=consts,
+            code=code,
+            version=version,
+        )
+
+    except LoadError:
+        raise
+    except UnicodeDecodeError as exc:
+        raise LoadError('Строка владельца или пула не является корректным UTF-8') from exc
 
 
 # ════════════════════════════════════════════════════════════════════════

@@ -391,7 +391,6 @@ def x3(a, b):
 
     return wrap32(result)
 
-
 HIDDEN = {
     'X1': x1,
     'X2': x2,
@@ -437,31 +436,68 @@ class Heap:
         vm передаётся, чтобы сборщик мог спросить у машины корни (vm.roots())
         и номер текущей команды (vm.steps) для графика.
         """
+
+        """Выделение памяти с автоматическим запуском сборщика мусора."""
+
         if not isinstance(n, int) or not 1 <= n <= 4096:
             raise VMError('неверный размер массива')
 
-        obj = HeapObject(n, fill)
+        # Если включён обычный режим, проверяем свободное место.
+        if not self.no_limit and self.used + n + 1 > self.capacity:
 
+            # Пытаемся освободить память.
+            self.collect(vm)
+
+            # Если места всё ещё недостаточно — сообщаем об ошибке.
+            if self.used + n + 1 > self.capacity:
+                raise VMError('OUT OF MEMORY')
+
+        # Создаём новый объект.
+        obj = HeapObject(n, fill)
         self.objects.append(obj)
+
+        # Обновляем статистику.
         self.used += n + 1
         self.peak = max(self.peak, self.used)
         self.allocated += 1
         self.log.append((vm.steps, self.used, 'alloc'))
 
         return obj
-        # TODO 6.3  Перед созданием: если не no_limit и used + (n+1) > capacity —
-        #           self.collect(vm); если места всё равно нет — VMError('OUT OF MEMORY').
-        raise NotImplementedError('Глава 4: Heap.alloc')
 
     def collect(self, vm):
         """Сборка мусора «пометка и очистка» (mark & sweep). Глава 6."""
-        # TODO 6.2  1) gc_count += 1, запись в log (vm.steps, used, 'gc_before')
-        #           2) пометка: обойти всё достижимое из vm.roots()
-        #              (без рекурсии Python — используйте список-«очередь дел»)
-        #           3) очистка: непомеченные -> alive = False, вернуть их слоты,
-        #              помеченным снять пометку
-        #           4) запись в log (vm.steps, used, 'gc_after')
-        raise NotImplementedError('Глава 6: Heap.collect')
+        # 1. Начинаем сборку и записываем состояние кучи.
+        self.gc_count += 1
+        self.log.append((vm.steps, self.used, 'gc_before'))
+
+        # 2. Пометка: находим все объекты, достижимые из корней.
+        pending = list(vm.roots())
+
+        while pending:
+            value = pending.pop()
+
+            if isinstance(value, HeapObject) and value.alive and not value.marked:
+                value.marked = True
+                pending.extend(value.items)
+
+        # 3. Очистка: освобождаем непомеченные объекты.
+        survivors = []
+
+        for obj in self.objects:
+            if obj.marked:
+                # Объект используется — сохраняем его.
+                obj.marked = False
+                survivors.append(obj)
+            else:
+                # Объект больше недостижим — освобождаем память.
+                obj.alive = False
+                self.used -= len(obj.items) + 1
+                self.freed += 1
+
+        self.objects = survivors
+
+        # 4. Записываем состояние кучи после сборки.
+        self.log.append((vm.steps, self.used, 'gc_after'))
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -892,8 +928,12 @@ class VM:
     def roots(self):
         """Все значения, с которых сборщик начинает обход:
         стек операндов, локальные ВСЕХ кадров, глобальные."""
-        # TODO 6.1  Удобно сделать генератором:  yield from self.stack  и т. д.
-        raise NotImplementedError('Глава 6: VM.roots')
+        yield from self.stack
+
+        for frame in self.frames:
+            yield from frame.locals
+
+        yield from self.globals
 
 
 def _short(v):
@@ -931,8 +971,63 @@ def save_png(screen, path, scale=10):
 
 def plot_heap(log, capacity, path):
     """График занятости кучи (глава 6). По горизонтали — номер команды, по вертикали — used."""
-    # TODO 6.4  matplotlib: точки из log, линия ёмкости (axhline), моменты сборок.
-    print('(график кучи ещё не написан — глава 6)')
+    import matplotlib.pyplot as plt
+
+    if not log:
+        print('Нет данных для построения графика кучи')
+        return
+
+    steps = [event[0] for event in log]
+    used = [event[1] for event in log]
+    kinds = [event[2] for event in log]
+
+    plt.figure(figsize=(12, 6))
+
+    # Изменение занятой памяти во время выполнения программы.
+    plt.plot(steps, used, label='Занято памяти', linewidth=1.5)
+
+    # Отмечаем моменты выделения памяти.
+    alloc_steps = [
+        steps[i] for i in range(len(log)) if kinds[i] == 'alloc'
+    ]
+    alloc_used = [
+        used[i] for i in range(len(log)) if kinds[i] == 'alloc'
+    ]
+    plt.scatter(alloc_steps, alloc_used, label='Выделение памяти',
+                s=12, marker='o')
+
+    # Отмечаем сборку мусора до и после её выполнения.
+    gc_before_steps = [
+        steps[i] for i in range(len(log)) if kinds[i] == 'gc_before'
+    ]
+    gc_before_used = [
+        used[i] for i in range(len(log)) if kinds[i] == 'gc_before'
+    ]
+    gc_after_steps = [
+        steps[i] for i in range(len(log)) if kinds[i] == 'gc_after'
+    ]
+    gc_after_used = [
+        used[i] for i in range(len(log)) if kinds[i] == 'gc_after'
+    ]
+
+    plt.scatter(gc_before_steps, gc_before_used,
+                label='До сборки мусора', marker='x', s=45)
+    plt.scatter(gc_after_steps, gc_after_used,
+                label='После сборки мусора', marker='^', s=45)
+
+    # Линия максимальной ёмкости кучи.
+    plt.axhline(capacity, linestyle='--',
+                label=f'Ёмкость кучи: {capacity}')
+
+    plt.xlabel('Количество выполненных команд')
+    plt.ylabel('Занято слотов')
+    plt.title('Использование кучи во время выполнения программы')
+
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()
 
 
 BENCH_EXPECTED = 'БЕНЧМАРК: КОЛЛАЦ, N = 5000\nЛУЧШЕЕ n = 3711, ДЛИНА = 237\nСУММА ДЛИН = 387940\n'

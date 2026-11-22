@@ -325,20 +325,33 @@ def wrap32(x: int) -> int:
 
     wrap32(2**31) -> -2147483648      wrap32(65536 * 65536) -> 0
     """
-    # TODO 3.1  Подсказка: x & 0xFFFFFFFF, а потом разберитесь со знаком.
-    raise NotImplementedError('Глава 3: wrap32')
+    x = x & 0xFFFFFFFF
+
+    if x >= 0x80000000:
+        x -= 0x100000000
+
+    return x
 
 
 def java_div(a: int, b: int) -> int:
     """Частное, округлённое К НУЛЮ:  java_div(-7, 2) -> -3   (а -7 // 2 в Python = -4!)."""
-    # TODO 3.2  b == 0 -> raise VMError('деление на ноль')
-    raise NotImplementedError('Глава 3: java_div')
+    if b == 0:
+        raise VMError('деление на ноль')
+
+    result = abs(a) // abs(b)
+
+    if (a < 0) != (b < 0):
+        result = -result
+
+    return wrap32(result)
 
 
 def java_mod(a: int, b: int) -> int:
     """Остаток со знаком делимого:  a - b * java_div(a, b).   java_mod(-7, 2) -> -1."""
-    # TODO 3.2
-    raise NotImplementedError('Глава 3: java_mod')
+    if b == 0:
+        raise VMError('деление на ноль')
+
+    return wrap32(a - b * java_div(a, b))
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -525,18 +538,26 @@ class VM:
     # ── ГЛАВА 3: стек ───────────────────────────────────────────────────
     def push(self, v):
         """Положить значение на стек. Больше STACK_LIMIT — VMError('переполнение стека')."""
-        # TODO 3.3
-        raise NotImplementedError('Глава 3: VM.push')
+        if len(self.stack) >= STACK_LIMIT:
+            raise VMError('переполнение стека')
+
+        self.stack.append(v)
 
     def pop(self):
         """Снять значение. Если стек не выше дна текущего кадра — VMError('стек пуст')."""
-        # TODO 3.3  Дно — self.frame.base
-        raise NotImplementedError('Глава 3: VM.pop')
+        if len(self.stack) <= self.frame.base:
+            raise VMError('стек пуст')
+
+        return self.stack.pop()
 
     def pop_int(self) -> int:
         """Снять ЧИСЛО. Если там ссылка — VMError('ожидалось число')."""
-        # TODO 3.3
-        raise NotImplementedError('Глава 3: VM.pop_int')
+        value = self.pop()
+
+        if isinstance(value, HeapObject):
+            raise VMError('ожидалось число')
+
+        return value
 
     def pop_ref(self) -> HeapObject:
         """Снять ССЫЛКУ на живой объект. Число — 'ожидалась ссылка';
@@ -557,8 +578,46 @@ class VM:
         4. Если обработчик бросил VMError(msg), перебросить
            VMError(f'pc={pc:04X} {мнемоника}: {msg}') — чтобы было видно, где упало.
         """
-        # TODO 3.4
-        raise NotImplementedError('Глава 3: VM.step')
+        pc = self.pc
+
+        # 1. Расшифровываем команду по текущему адресу.
+        result = decode(self.code, pc)
+
+        # Если команда неизвестна или её нельзя полностью прочитать.
+        if result is None:
+            if 0 <= pc < len(self.code):
+                byte = self.code[pc]
+                byte_text = f'0x{byte:02X}'
+            else:
+                byte_text = 'неизвестен'
+
+            raise VMError(
+                f'pc={pc:04X}: неизвестная команда {byte_text}'
+            )
+
+        mnemonic, operands, next_pc = result
+
+        # Проверяем, есть ли обработчик команды.
+        if mnemonic not in self.handlers:
+            byte = self.code[pc]
+            raise VMError(
+                f'pc={pc:04X}: неизвестная команда 0x{byte:02X}'
+            )
+
+        # 2. Учитываем выполненную команду и переходим к следующей.
+        self.steps += 1
+        self.pc = next_pc
+
+        # 3. Выполняем команду.
+        try:
+            self.handlers[mnemonic](operands)
+
+        # 4. Добавляем адрес и название команды к ошибке.
+        except VMError as exc:
+            raise VMError(
+                f'pc={pc:04X} {mnemonic}: {exc}'
+            ) from exc
+
 
     # ── обработчики команд ──────────────────────────────────────────────
     # Каждый получает список операндов args (может быть пустым).
@@ -576,10 +635,119 @@ class VM:
     def op_halt(self, args):
         self.halted = True
 
-    # TODO 3.5  Напишите остальные обработчики. Имена: op_pop, op_dup, op_swap,
-    #   op_add, op_sub, op_mul, op_div, op_mod, op_neg, op_eq, op_lt, op_gt, op_not,
-    #   op_load, op_store, op_gload, op_gstore, op_jmp, op_jz, op_jnz,
-    #   op_print, op_printc, op_assert                                  (глава 3)
+    def op_pop(self, args):
+        self.pop()
+
+    def op_dup(self, args):
+        value = self.pop()
+        self.push(value)
+        self.push(value)
+
+    def op_swap(self, args):
+        a = self.pop()
+        b = self.pop()
+        self.push(a)
+        self.push(b)
+
+    def op_add(self, args):
+        b = self.pop_int()
+        a = self.pop_int()
+        self.push(wrap32(a + b))
+
+    def op_sub(self, args):
+        b = self.pop_int()
+        a = self.pop_int()
+        self.push(wrap32(a - b))
+
+    def op_mul(self, args):
+        b = self.pop_int()
+        a = self.pop_int()
+        self.push(wrap32(a * b))
+
+    def op_div(self, args):
+        b = self.pop_int()
+        a = self.pop_int()
+        self.push(java_div(a, b))
+
+    def op_mod(self, args):
+        b = self.pop_int()
+        a = self.pop_int()
+        self.push(java_mod(a, b))
+
+    def op_neg(self, args):
+        a = self.pop_int()
+        self.push(wrap32(-a))
+
+    def op_eq(self, args):
+        b = self.pop_int()
+        a = self.pop_int()
+        self.push(1 if a == b else 0)
+
+    def op_lt(self, args):
+        b = self.pop_int()
+        a = self.pop_int()
+        self.push(1 if a < b else 0)
+
+    def op_gt(self, args):
+        b = self.pop_int()
+        a = self.pop_int()
+        self.push(1 if a > b else 0)
+
+    def op_not(self, args):
+        a = self.pop_int()
+        self.push(1 if a == 0 else 0)
+   
+    def op_load(self, args):
+        index = args[0]
+        if index >= len(self.frame.locals):
+            raise VMError('неверный индекс локальной переменной')
+        self.push(self.frame.locals[index])
+
+    def op_store(self, args):
+        index = args[0]
+        if index >= len(self.frame.locals):
+            raise VMError('неверный индекс локальной переменной')
+        self.frame.locals[index] = self.pop()
+
+    def op_gload(self, args):
+        index = args[0]
+        if index >= len(self.globals):
+            raise VMError('неверный индекс глобальной переменной')
+        self.push(self.globals[index])
+
+    def op_gstore(self, args):
+        index = args[0]
+        if index >= len(self.globals):
+            raise VMError('неверный индекс глобальной переменной')
+        self.globals[index] = self.pop()
+
+    def op_jmp(self, args):
+        self.pc = args[0]
+
+    def op_jz(self, args):
+        value = self.pop_int()
+        if value == 0:
+            self.pc = args[0]
+
+    def op_jnz(self, args):
+        value = self.pop_int()
+        if value != 0:
+            self.pc = args[0]
+
+    def op_print(self, args):
+        value = self.pop_int()
+        self.write(str(value))
+
+    def op_printc(self, args):
+        value = self.pop_int()
+        self.write(chr(value))
+
+    def op_assert(self, args):
+        value = self.pop_int()
+        if value == 0:
+            raise VMError(f'ASSERT {args[0]}: тест не пройден')
+        
+    # TODO 3.5  Напишите остальные обработчики. Имена: 
     #   op_call, op_ret, op_new, op_getf, op_setf, op_len, op_meminfo, op_pix (глава 4)
     #
     # Пример для разгона:

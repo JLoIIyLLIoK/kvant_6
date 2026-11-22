@@ -205,8 +205,36 @@ def decode(code: bytes, pc: int):
     decode(bytes([0x01, 0, 0, 0, 42]), 0)  ->  ('PUSH', [42], 5)
     decode(bytes([0x2B, 0, 8, 1]), 0)      ->  ('CALL', [8, 1], 4)
     """
-    # TODO 2.1  Не забудьте: i32 — со знаком (int.from_bytes(..., 'big', signed=True)).
-    raise NotImplementedError('Глава 2: decode')
+    if pc < 0 or pc >= len(code):
+        return None
+
+    opcode = code[pc]
+
+    if opcode not in OPCODES:
+        return None
+
+    mnemonic, fmt = OPCODES[opcode]
+
+    operands = []
+    pos = pc + 1
+
+    for kind in fmt:
+        size = OPERAND_SIZE[kind]
+
+        if pos + size > len(code):
+            return None
+
+        raw = code[pos:pos + size]
+
+        if kind == 'i':
+            value = int.from_bytes(raw, 'big', signed=True)
+        else:
+            value = int.from_bytes(raw, 'big', signed=False)
+
+        operands.append(value)
+        pos += size
+
+    return mnemonic, operands, pos
 
 
 def disassemble(cart: Cartridge) -> str:
@@ -220,8 +248,72 @@ def disassemble(cart: Cartridge) -> str:
     Метки L_XXXX — у адресов, на которые ведут переходы/вызовы, и у точки входа.
     Неизвестный байт печатается как  ??      0x40  и разбор идёт дальше со следующего байта.
     """
-    # TODO 2.2  Сделайте два прохода: сначала соберите адреса меток, потом печатайте.
-    raise NotImplementedError('Глава 2: disassemble')
+
+    code = cart.code
+
+    # Первый проход: собираем адреса меток.
+    labels = {cart.entry}
+    pc = 0
+
+    while pc < len(code):
+        result = decode(code, pc)
+
+        if result is None:
+            pc += 1
+            continue
+
+        mnemonic, operands, next_pc = result
+
+        if mnemonic in ('JMP', 'JZ', 'JNZ', 'CALL'):
+            labels.add(operands[0])
+
+        pc = next_pc
+
+    # Второй проход: формируем текст листинга.
+    lines = []
+    pc = 0
+
+    while pc < len(code):
+        # Если текущий адрес является меткой, выводим её.
+        if pc in labels:
+            label_line = f'L_{pc:04X}:'
+
+            if pc == cart.entry:
+                label_line += '    ; точка входа'
+
+            lines.append(label_line)
+
+        result = decode(code, pc)
+
+        # Неизвестная команда: выводим байт и переходим дальше.
+        if result is None:
+            lines.append(f'  {pc:04X}  ??      0x{code[pc]:02X}')
+            pc += 1
+            continue
+
+        mnemonic, operands, next_pc = result
+
+        # Формируем операнды.
+        if mnemonic in ('JMP', 'JZ', 'JNZ', 'CALL'):
+            args = [f'L_{operands[0]:04X}']
+            args.extend(str(x) for x in operands[1:])
+        else:
+            args = [str(x) for x in operands]
+
+        line = f'  {pc:04X}  {mnemonic:<7}'
+
+        if args:
+            line += ' ' + ', '.join(args)
+
+        # Для PRINTS показываем соответствующую строку.
+        if mnemonic == 'PRINTS':
+            line += f'    ; {cart.consts[operands[0]]!r}'
+
+        lines.append(line.rstrip())
+        pc = next_pc
+
+    return '\n'.join(lines) + '\n'
+
 
 
 # ════════════════════════════════════════════════════════════════════════

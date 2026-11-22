@@ -368,7 +368,36 @@ def java_mod(a: int, b: int) -> int:
 # Пока команды нет в словаре, машина честно останавливается на ней
 # с ошибкой «неизвестная команда 0x40».
 
-HIDDEN = {}
+
+def x1(a, b):
+    """X1 — минимум двух знаковых 32-битных чисел."""
+    return min(a, b)
+
+
+def x2(a, b):
+    """X2 — побитовое исключающее ИЛИ."""
+    return wrap32(a ^ b)
+
+
+def x3(a, b):
+    """X3 — циклический сдвиг влево на b позиций."""
+    value = a & 0xFFFFFFFF
+    shift = b & 31
+
+    if shift == 0:
+        result = value
+    else:
+        result = ((value << shift) | (value >> (32 - shift))) & 0xFFFFFFFF
+
+    return wrap32(result)
+
+
+HIDDEN = {
+    'X1': x1,
+    'X2': x2,
+    'X3': x3,
+}
+
 
 
 # ════════════════════════════════════════════════════════════════════════
